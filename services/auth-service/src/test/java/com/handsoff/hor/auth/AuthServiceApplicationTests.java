@@ -25,6 +25,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.context.annotation.Import;
+import org.flywaydb.core.Flyway;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -38,6 +39,7 @@ class AuthServiceApplicationTests {
     private static final String BOOTSTRAP_PASSWORD = java.util.UUID.randomUUID().toString() + "-test";
     private static final String STORE_USER_PASSWORD = java.util.UUID.randomUUID().toString() + "-test";
     private static final String STORE_USER_EMAIL = "session.user@test.local";
+    private static final String MANAGED_ADMIN_PASSWORD = UUID.randomUUID().toString() + "-test";
 
     @Autowired
     private JdbcClient jdbcClient;
@@ -54,12 +56,20 @@ class AuthServiceApplicationTests {
     @Autowired
     private PasswordHasher passwordHasher;
 
+    @Autowired
+    private Flyway flyway;
+
     @LocalServerPort
     private int port;
 
     @BeforeEach
-    void resetTestClock() {
+    void resetTestDatabase() {
         clock.reset();
+        jdbcClient.sql("DROP SCHEMA IF EXISTS core CASCADE").update();
+        jdbcClient.sql("DROP EXTENSION IF EXISTS citext CASCADE").update();
+        flyway.clean();
+        flyway.migrate();
+        bootstrapService.initialize();
     }
 
     @DynamicPropertySource
@@ -166,6 +176,199 @@ class AuthServiceApplicationTests {
     }
 
     @Test
+    void adminCreatesStaffAndClientWithFixedTypeAndOptionalPatchRemoval() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String staffPassword = UUID.randomUUID().toString() + "-test";
+        String clientPassword = UUID.randomUUID().toString() + "-test";
+        HttpResponse<String> staff = createUser(actor, "STAFF", "staff.user@test.local", "Staff User",
+                staffPassword, "555 555 1234", "Office");
+        HttpResponse<String> client = createUser(actor, "CLIENT", "client.user@test.local", "Client User",
+                clientPassword, null, "Client Address");
+        assertThat(staff.statusCode()).isEqualTo(201);
+        assertThat(staff.body()).contains("HOR_STAFF");
+        assertThat(client.statusCode()).isEqualTo(201);
+        assertThat(client.body()).contains("CLIENT_USER");
+
+        long staffId = storeUserId("staff.user@test.local");
+        HttpResponse<String> fixedType = actor.send("PATCH", "/api/auth/admin/users/" + staffId,
+                "{\"userType\":\"CLIENT\"}", true, null);
+        assertThat(fixedType.statusCode()).isEqualTo(422);
+        assertThat(fixedType.body()).contains("USER_TYPE_FIXED");
+
+        HttpResponse<String> removedOptionalFields = actor.send("PATCH", "/api/auth/admin/users/" + staffId,
+                "{\"phoneNumber\":\"\",\"address\":\"\"}", true, null);
+        assertThat(removedOptionalFields.statusCode()).isEqualTo(200);
+        assertThat(removedOptionalFields.body()).doesNotContain("phoneNumber", "address");
+        assertThat(jdbcClient.sql("SELECT phone_number IS NULL AND address IS NULL FROM core.store_users WHERE user_id = :id")
+                .param("id", staffId).query(Boolean.class).single()).isTrue();
+
+        HttpResponse<String> mixedStatus = actor.send("PATCH", "/api/auth/admin/users/" + staffId,
+                "{\"status\":\"DISABLED\",\"address\":\"new\"}", true, null);
+        assertThat(mixedStatus.statusCode()).isEqualTo(422);
+        assertThat(mixedStatus.body()).contains("STATUS_CHANGE_ALONE");
+    }
+
+    @Test
+    void emailUniquenessIsSharedBetweenAdminsAndStoreUsers() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String password = UUID.randomUUID().toString() + "-test";
+        HttpResponse<String> conflict = createUser(actor, "CLIENT", "bootstrap.admin@test.local", "Duplicate",
+                password, null, null);
+        assertThat(conflict.statusCode()).isEqualTo(409);
+        assertThat(conflict.body()).contains("EMAIL_TAKEN");
+    }
+
+    @Test
+    void disablingAndResettingUsersRevokeSessions() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "disabled.user@test.local";
+        String password = UUID.randomUUID().toString() + "-test";
+        assertThat(createUser(actor, "STAFF", email, "Disabled User", password, null, null).statusCode()).isEqualTo(201);
+        long id = storeUserId(email);
+        AuthHttpClient user = new AuthHttpClient(port);
+        assertThat(user.login(email, password).statusCode()).isEqualTo(200);
+
+        assertThat(actor.send("PATCH", "/api/auth/admin/users/" + id, "{\"status\":\"DISABLED\"}", true, null)
+                .statusCode()).isEqualTo(200);
+        assertThat(user.post("/api/auth/refresh").statusCode()).isEqualTo(401);
+        assertThat(actor.send("PATCH", "/api/auth/admin/users/" + id, "{\"status\":\"ACTIVE\"}", true, null)
+                .statusCode()).isEqualTo(200);
+        assertThat(user.login(email, password).statusCode()).isEqualTo(200);
+
+        String replacementPassword = UUID.randomUUID().toString() + "-test";
+        assertThat(actor.send("POST", "/api/auth/admin/users/" + id + "/password-reset",
+                "{\"newPassword\":\"" + replacementPassword + "\"}", true, null).statusCode()).isEqualTo(204);
+        assertThat(user.post("/api/auth/refresh").statusCode()).isEqualTo(401);
+        assertThat(new AuthHttpClient(port).login(email, password).statusCode()).isEqualTo(401);
+        assertThat(new AuthHttpClient(port).login(email, replacementPassword).statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void unlockingAnUnlockedUserStillCreatesAuditRow() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "unlock.user@test.local";
+        assertThat(createUser(actor, "CLIENT", email, "Unlock User", UUID.randomUUID().toString() + "-test",
+                null, null).statusCode()).isEqualTo(201);
+        long id = storeUserId(email);
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'USER_UNLOCKED' AND target_id = :id")
+                .param("id", id).query(Long.class).single()).isZero();
+        assertThat(actor.send("POST", "/api/auth/admin/users/" + id + "/unlock", null, true, null)
+                .statusCode()).isEqualTo(204);
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'USER_UNLOCKED' AND target_id = :id")
+                .param("id", id).query(Long.class).single()).isEqualTo(1L);
+    }
+
+    @Test
+    void adminCreateSearchCaseInsensitiveEmailUniquenessAndPagination() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "managed.admin@test.local";
+        HttpResponse<String> created = createAdmin(actor, email, "Managed Admin", MANAGED_ADMIN_PASSWORD, null);
+        assertThat(created.statusCode()).isEqualTo(201);
+
+        HttpResponse<String> found = actor.get("/api/auth/admin/platform-admins?q=AGED.ADMIN&limit=1&offset=0");
+        assertThat(found.statusCode()).isEqualTo(200);
+        assertThat(found.body()).contains("managed.admin@test.local", "Managed Admin", "\"total\":1");
+
+        HttpResponse<String> duplicate = createAdmin(actor, email.toUpperCase(java.util.Locale.ROOT),
+                "Duplicate Admin", MANAGED_ADMIN_PASSWORD, null);
+        assertThat(duplicate.statusCode()).isEqualTo(409);
+        assertThat(duplicate.body()).contains("EMAIL_TAKEN");
+
+        HttpResponse<String> emptyPage = actor.get("/api/auth/admin/platform-admins?limit=0");
+        assertThat(emptyPage.statusCode()).isEqualTo(200);
+        assertThat(emptyPage.body()).contains("\"items\":[]", "\"limit\":0");
+        HttpResponse<String> invalidLimit = actor.get("/api/auth/admin/platform-admins?limit=-1");
+        assertThat(invalidLimit.statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void adminPatchChangesEmailAndEmptyPhoneRemovesValue() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "editable.admin@test.local";
+        assertThat(createAdmin(actor, email, "Editable Admin", MANAGED_ADMIN_PASSWORD, "555 555 5555").statusCode())
+                .isEqualTo(201);
+        long id = adminId(email);
+
+        HttpResponse<String> updated = actor.send("PATCH", "/api/auth/admin/platform-admins/" + id,
+                "{\"email\":\"renamed.admin@test.local\",\"fullName\":\"Renamed Admin\",\"phoneNumber\":\"\"}",
+                true, null);
+        assertThat(updated.statusCode()).isEqualTo(200);
+        assertThat(updated.body()).contains("renamed.admin@test.local", "Renamed Admin");
+        assertThat(updated.body()).doesNotContain("phoneNumber");
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.account_emails WHERE email = :email")
+                .param("email", email).query(Long.class).single()).isZero();
+    }
+
+    @Test
+    void adminStatusMustBeAloneAndDisablingEndsTargetSessions() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "disable.target@test.local";
+        assertThat(createAdmin(actor, email, "Disable Target", MANAGED_ADMIN_PASSWORD, null).statusCode()).isEqualTo(201);
+        long id = adminId(email);
+        AuthHttpClient target = new AuthHttpClient(port);
+        assertThat(target.login(email, MANAGED_ADMIN_PASSWORD).statusCode()).isEqualTo(200);
+
+        HttpResponse<String> combined = actor.send("PATCH", "/api/auth/admin/platform-admins/" + id,
+                "{\"status\":\"DISABLED\",\"fullName\":\"Other Name\"}", true, null);
+        assertThat(combined.statusCode()).isEqualTo(422);
+        assertThat(combined.body()).contains("STATUS_CHANGE_ALONE");
+
+        HttpResponse<String> disabled = actor.send("PATCH", "/api/auth/admin/platform-admins/" + id,
+                "{\"status\":\"DISABLED\"}", true, null);
+        assertThat(disabled.statusCode()).isEqualTo(200);
+        assertThat(target.post("/api/auth/refresh").statusCode()).isEqualTo(401);
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'ADMIN_DISABLED' AND target_id = :id")
+                .param("id", id).query(Long.class).single()).isEqualTo(1L);
+    }
+
+    @Test
+    void adminCannotDisableSelfOrLastActiveAdmin() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        long bootstrapId = adminId("bootstrap.admin@test.local");
+        HttpResponse<String> selfDisable = actor.send("PATCH", "/api/auth/admin/platform-admins/" + bootstrapId,
+                "{\"status\":\"DISABLED\"}", true, null);
+        assertThat(selfDisable.statusCode()).isEqualTo(422);
+        assertThat(selfDisable.body()).contains("CANNOT_DISABLE_SELF");
+
+        String secondEmail = "second.admin@test.local";
+        String secondPassword = UUID.randomUUID().toString() + "-test";
+        assertThat(createAdmin(actor, secondEmail, "Second Admin", secondPassword, null).statusCode()).isEqualTo(201);
+        long secondId = adminId(secondEmail);
+        AuthHttpClient second = new AuthHttpClient(port);
+        assertThat(second.login(secondEmail, secondPassword).statusCode()).isEqualTo(200);
+        jdbcClient.sql("UPDATE core.platform_admins SET status = 'DISABLED' WHERE admin_id = :id")
+                .param("id", secondId).update();
+
+        HttpResponse<String> lastAdmin = second.send("PATCH", "/api/auth/admin/platform-admins/" + bootstrapId,
+                "{\"status\":\"DISABLED\"}", true, null);
+        assertThat(lastAdmin.statusCode()).isEqualTo(422);
+        assertThat(lastAdmin.body()).contains("LAST_ACTIVE_ADMIN");
+    }
+
+    @Test
+    void passwordResetMayTargetTheCurrentAdminAndUnlockAlwaysAudits() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        long id = adminId("bootstrap.admin@test.local");
+        String replacementPassword = UUID.randomUUID().toString() + "-test";
+        HttpResponse<String> reset = actor.send("POST", "/api/auth/admin/platform-admins/" + id + "/password-reset",
+                "{\"newPassword\":\"" + replacementPassword + "\"}", true, null);
+        assertThat(reset.statusCode()).isEqualTo(204);
+        assertThat(actor.post("/api/auth/refresh").statusCode()).isEqualTo(401);
+        AuthHttpClient reauthenticated = new AuthHttpClient(port);
+        assertThat(reauthenticated.login("bootstrap.admin@test.local", replacementPassword).statusCode()).isEqualTo(200);
+
+        long before = jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'ADMIN_UNLOCKED' AND target_id = :id")
+                .param("id", id).query(Long.class).single();
+        assertThat(reauthenticated.send("POST", "/api/auth/admin/platform-admins/" + id + "/unlock", null, true, null)
+                .statusCode()).isEqualTo(204);
+        assertThat(reauthenticated.send("POST", "/api/auth/admin/platform-admins/" + id + "/unlock", null, true, null)
+                .statusCode()).isEqualTo(204);
+        long after = jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'ADMIN_UNLOCKED' AND target_id = :id")
+                .param("id", id).query(Long.class).single();
+        assertThat(after - before).isEqualTo(2L);
+    }
+
+    @Test
     void storeUsersCanKeepMultipleActiveSessions() throws Exception {
         createTestStoreUser();
         AuthHttpClient clientA = new AuthHttpClient(port);
@@ -218,6 +421,40 @@ class AuthServiceApplicationTests {
         }
         assertThat(jdbcClient.sql("SELECT count(*) FROM core.admin_refresh_tokens WHERE revoked_at IS NULL")
                 .query(Long.class).single()).isEqualTo(1L);
+    }
+
+    private AuthHttpClient signedInBootstrapAdmin() throws Exception {
+        AuthHttpClient client = new AuthHttpClient(port);
+        assertThat(client.login("bootstrap.admin@test.local", BOOTSTRAP_PASSWORD).statusCode()).isEqualTo(200);
+        return client;
+    }
+
+    private HttpResponse<String> createAdmin(AuthHttpClient actor, String email, String fullName,
+            String password, String phoneNumber) throws Exception {
+        String phone = phoneNumber == null ? "" : ",\"phoneNumber\":\"" + phoneNumber + "\"";
+        String body = "{\"email\":\"" + email + "\",\"fullName\":\"" + fullName
+                + "\",\"password\":\"" + password + "\"" + phone + "}";
+        return actor.send("POST", "/api/auth/admin/platform-admins", body, true, null);
+    }
+
+    private long adminId(String email) {
+        return jdbcClient.sql("SELECT admin_id FROM core.platform_admins WHERE email = :email")
+                .param("email", email).query(Long.class).single();
+    }
+
+    private HttpResponse<String> createUser(AuthHttpClient actor, String userType, String email,
+            String fullName, String password, String phoneNumber, String address) throws Exception {
+        String phone = phoneNumber == null ? "" : ",\"phoneNumber\":\"" + phoneNumber + "\"";
+        String userAddress = address == null ? "" : ",\"address\":\"" + address + "\"";
+        String body = "{\"userType\":\"" + userType + "\",\"email\":\"" + email
+                + "\",\"fullName\":\"" + fullName + "\",\"password\":\"" + password
+                + "\"" + phone + userAddress + "}";
+        return actor.send("POST", "/api/auth/admin/users", body, true, null);
+    }
+
+    private long storeUserId(String email) {
+        return jdbcClient.sql("SELECT user_id FROM core.store_users WHERE email = :email")
+                .param("email", email).query(Long.class).single();
     }
 
     private void createTestStoreUser() {
