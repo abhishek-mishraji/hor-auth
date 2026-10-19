@@ -23,6 +23,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.context.annotation.Import;
 import org.flywaydb.core.Flyway;
@@ -32,6 +37,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ExtendWith(OutputCaptureExtension.class)
 @Import(TestFlywayConfiguration.class)
 @ContextConfiguration(initializers = TestDatabaseInitializer.class)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
@@ -173,6 +179,152 @@ class AuthServiceApplicationTests {
         assertThat(client.post("/api/auth/logout").statusCode()).isEqualTo(204);
         assertTrue(client.cookieHeader().isEmpty(), "Logout must remove cookies from the test client.");
         assertThat(client.post("/api/auth/refresh").statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void ownPasswordChangeChecksCurrentPasswordAndRevokesOtherSessions() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "change.password@test.local";
+        String currentPassword = UUID.randomUUID().toString() + "-test";
+        createUser(actor, "CLIENT", email, "Password Change User", currentPassword, null, null);
+        AuthHttpClient clientA = new AuthHttpClient(port);
+        AuthHttpClient clientB = new AuthHttpClient(port);
+        assertThat(clientA.login(email, currentPassword).statusCode()).isEqualTo(200);
+        assertThat(clientB.login(email, currentPassword).statusCode()).isEqualTo(200);
+        long auditCount = jdbcClient.sql("SELECT count(*) FROM core.audit_log").query(Long.class).single();
+        String replacementPassword = UUID.randomUUID().toString() + "-test";
+        HttpResponse<String> wrongCurrent = clientA.send("POST", "/api/auth/me/password",
+                "{\"currentPassword\":\"" + UUID.randomUUID() + "\",\"newPassword\":\"" + replacementPassword + "\"}",
+                true, null);
+        assertThat(wrongCurrent.statusCode()).isEqualTo(422);
+        assertThat(wrongCurrent.body()).contains("WRONG_PASSWORD");
+
+        HttpResponse<String> changed = clientA.send("POST", "/api/auth/me/password",
+                "{\"currentPassword\":\"" + currentPassword + "\",\"newPassword\":\"" + replacementPassword + "\"}",
+                true, null);
+        assertThat(changed.statusCode()).isEqualTo(204);
+        assertThat(clientA.cookieNames()).containsExactlyInAnyOrder("hor_access", "hor_refresh");
+        boolean activeRefreshToken = jdbcClient.sql("SELECT EXISTS (SELECT 1 FROM core.user_refresh_tokens WHERE token_hash = :hash AND revoked_at IS NULL)")
+                .param("hash", refreshTokens.hash(clientA.cookieValue("hor_refresh")))
+                .query(Boolean.class).single();
+        assertThat(activeRefreshToken).isTrue();
+        HttpResponse<String> ownRefresh = clientA.post("/api/auth/refresh");
+        assertThat(ownRefresh.statusCode()).as("refresh problem: " + ownRefresh.body()).isEqualTo(204);
+        assertThat(clientB.post("/api/auth/refresh").statusCode()).isEqualTo(401);
+        assertThat(new AuthHttpClient(port).login(email, currentPassword).statusCode()).isEqualTo(401);
+        assertThat(new AuthHttpClient(port).login(email, replacementPassword).statusCode()).isEqualTo(200);
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.audit_log").query(Long.class).single()).isEqualTo(auditCount);
+    }
+
+    @Test
+    void storeUsersAreForbiddenFromEveryAdminRoute() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "forbidden.user@test.local";
+        String password = UUID.randomUUID().toString() + "-test";
+        createUser(actor, "CLIENT", email, "Forbidden User", password, null, null);
+        AuthHttpClient user = new AuthHttpClient(port);
+        assertThat(user.login(email, password).statusCode()).isEqualTo(200);
+        for (String path : List.of("/api/auth/admin/platform-admins", "/api/auth/admin/users",
+                "/api/auth/admin/stores", "/api/auth/admin/audit-log",
+                "/api/auth/admin/stores/1/members")) {
+            HttpResponse<String> response = user.get(path);
+            assertThat(response.statusCode()).isEqualTo(403);
+            assertThat(response.body()).contains("FORBIDDEN");
+        }
+    }
+
+    @Test
+    void startupRefusesAnEmptyDatabaseWithoutBootstrapCredentials() {
+        jdbcClient.sql("DROP SCHEMA IF EXISTS core CASCADE").update();
+        jdbcClient.sql("DROP EXTENSION IF EXISTS citext CASCADE").update();
+        flyway.clean();
+        flyway.migrate();
+        boolean bootstrapRefused = false;
+        SpringApplication application = new SpringApplication(AuthServiceApplication.class);
+        application.setWebApplicationType(WebApplicationType.SERVLET);
+        try (var context = application.run("--spring.profiles.active=test", "--server.port=0",
+                "--hor.auth.bootstrap.admin.email=", "--hor.auth.bootstrap.admin.password=")) {
+            assertThat(context.isActive()).isTrue();
+        } catch (RuntimeException exception) {
+            bootstrapRefused = hasCauseMessage(exception,
+                    "Bootstrap admin email and password are required when platform_admins is empty.");
+        }
+        assertTrue(bootstrapRefused, "Application must refuse first start without bootstrap credentials.");
+    }
+
+    @Test
+    void authenticationAndSessionLogsExcludePasswordsHashesTokensAndCookies(CapturedOutput capturedOutput)
+            throws Exception {
+        AuthHttpClient actor = new AuthHttpClient(port);
+        String password = BOOTSTRAP_PASSWORD;
+        String replacementPassword = UUID.randomUUID().toString() + "-test";
+        String originalHash = jdbcClient.sql("SELECT password_hash FROM core.platform_admins WHERE email = :email")
+                .param("email", "bootstrap.admin@test.local").query(String.class).single();
+        assertThat(actor.login("bootstrap.admin@test.local", password).statusCode()).isEqualTo(200);
+        Map<String, String> loginCookies = actor.snapshotCookies();
+        assertThat(actor.post("/api/auth/refresh").statusCode()).isEqualTo(204);
+        Map<String, String> refreshCookies = actor.snapshotCookies();
+        long adminId = adminId("bootstrap.admin@test.local");
+        assertThat(actor.send("POST", "/api/auth/admin/platform-admins/" + adminId + "/password-reset",
+                "{\"newPassword\":\"" + replacementPassword + "\"}", true, null).statusCode()).isEqualTo(204);
+        String resetHash = jdbcClient.sql("SELECT password_hash FROM core.platform_admins WHERE admin_id = :id")
+                .param("id", adminId).query(String.class).single();
+        java.util.ArrayList<String> sensitiveValues = new java.util.ArrayList<>();
+        sensitiveValues.add(password);
+        sensitiveValues.add(replacementPassword);
+        sensitiveValues.add(originalHash);
+        sensitiveValues.add(resetHash);
+        sensitiveValues.addAll(loginCookies.values());
+        sensitiveValues.addAll(refreshCookies.values());
+        String logs = capturedOutput.toString();
+        assertTrue(sensitiveValues.stream().noneMatch(logs::contains),
+                "Captured logs must not include credentials, hashes, tokens, or cookie values.");
+        assertTrue(logs.contains("ADMIN:" + adminId), "Successful login and refresh logs should identify the account by id.");
+    }
+
+    @Test
+    void auditFiltersUseInclusiveFromExclusiveToAndResolveTargetLabels() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String email = "audit.user@test.local";
+        createUser(actor, "CLIENT", email, "Audit User", UUID.randomUUID().toString() + "-test", null, null);
+        String code = "AUD_" + UUID.randomUUID();
+        createStore(actor, code, "Audit Store", null, null, "US", "IN", "47872");
+        long storeId = storeId(code);
+        long userId = storeUserId(email);
+        assertThat(actor.send("PUT", "/api/auth/admin/stores/" + storeId + "/members/" + userId,
+                "{\"storeRole\":\"PARTNER\"}", true, null).statusCode()).isEqualTo(201);
+
+        String start = clock.instant().toString();
+        HttpResponse<String> inclusive = actor.get("/api/auth/admin/audit-log?from=" + start + "&action=STORE_ASSIGNED");
+        assertThat(inclusive.statusCode()).isEqualTo(200);
+        assertThat(inclusive.body()).contains(code, "Platform Administrator", "STORE_ASSIGNED", "PARTNER", "userId");
+        HttpResponse<String> exclusive = actor.get("/api/auth/admin/audit-log?to=" + start + "&action=STORE_ASSIGNED");
+        assertThat(exclusive.statusCode()).isEqualTo(200);
+        assertThat(exclusive.body()).contains("\"total\":0");
+        HttpResponse<String> filtered = actor.get("/api/auth/admin/audit-log?targetType=ASSIGNMENT&targetId=" + storeId);
+        assertThat(filtered.body()).contains(code, "\"targetType\":\"ASSIGNMENT\"");
+        assertThat(actor.get("/api/auth/admin/audit-log?from=not-an-instant").statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void auditRowsAreAppendOnly() throws Exception {
+        signedInBootstrapAdmin();
+        boolean updateRejected = false;
+        boolean deleteRejected = false;
+        try {
+            jdbcClient.sql("UPDATE core.audit_log SET detail = '{}'::jsonb WHERE audit_id = (SELECT min(audit_id) FROM core.audit_log)")
+                    .update();
+        } catch (org.springframework.dao.DataAccessException exception) {
+            updateRejected = true;
+        }
+        try {
+            jdbcClient.sql("DELETE FROM core.audit_log WHERE audit_id = (SELECT min(audit_id) FROM core.audit_log)")
+                    .update();
+        } catch (org.springframework.dao.DataAccessException exception) {
+            deleteRejected = true;
+        }
+        assertTrue(updateRejected, "Audit updates must be rejected by PostgreSQL.");
+        assertTrue(deleteRejected, "Audit deletes must be rejected by PostgreSQL.");
     }
 
     @Test
@@ -382,6 +534,9 @@ class AuthServiceApplicationTests {
 
         assertThat(actor.send("PATCH", "/api/auth/admin/users/" + id, "{\"status\":\"DISABLED\"}", true, null)
                 .statusCode()).isEqualTo(200);
+        HttpResponse<String> disabledLogin = new AuthHttpClient(port).login(email, password);
+        assertThat(disabledLogin.statusCode()).isEqualTo(403);
+        assertThat(disabledLogin.body()).contains("ACCOUNT_DISABLED");
         assertThat(user.post("/api/auth/refresh").statusCode()).isEqualTo(401);
         assertThat(actor.send("PATCH", "/api/auth/admin/users/" + id, "{\"status\":\"ACTIVE\"}", true, null)
                 .statusCode()).isEqualTo(200);
@@ -652,6 +807,15 @@ class AuthServiceApplicationTests {
                 .param("now", now.atOffset(java.time.ZoneOffset.UTC))
                 .param("adminId", adminId)
                 .update();
+    }
+
+    private boolean hasCauseMessage(Throwable exception, String fragment) {
+        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+            if (cause.getMessage() != null && cause.getMessage().contains(fragment)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<String> cookieAttributes(List<String> cookies) {
