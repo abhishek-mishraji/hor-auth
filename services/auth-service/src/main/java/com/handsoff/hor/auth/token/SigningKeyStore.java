@@ -46,11 +46,16 @@ public final class SigningKeyStore {
             }
             privateKey = readPrivateKey(path);
             publicKey = derivePublicKey(privateKey);
-            publicJwk = new RSAKey.Builder(publicKey)
+            RSAKey thumbprintKey = new RSAKey.Builder(publicKey)
                     .keyUse(KeyUse.SIGNATURE)
                     .algorithm(JWSAlgorithm.RS256)
                     .build();
-            keyId = publicJwk.computeThumbprint().toString();
+            keyId = thumbprintKey.computeThumbprint().toString();
+            publicJwk = new RSAKey.Builder(publicKey)
+                    .keyUse(KeyUse.SIGNATURE)
+                    .algorithm(JWSAlgorithm.RS256)
+                    .keyID(keyId)
+                    .build();
         } catch (IOException | GeneralSecurityException | com.nimbusds.jose.JOSEException exception) {
             throw new IllegalStateException("Unable to load or create the auth signing key.", exception);
         }

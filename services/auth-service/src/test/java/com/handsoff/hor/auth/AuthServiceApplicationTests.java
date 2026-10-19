@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.handsoff.hor.auth.bootstrap.BootstrapService;
 import com.handsoff.hor.auth.token.RefreshTokens;
 import com.handsoff.hor.auth.password.PasswordHasher;
+import com.nimbusds.jwt.SignedJWT;
+import com.nimbusds.jwt.JWTClaimsSet;
 import com.handsoff.hor.auth.support.TestDatabaseInitializer;
 import com.handsoff.hor.auth.support.TestFlywayConfiguration;
 import com.handsoff.hor.auth.support.AuthHttpClient;
@@ -117,6 +119,40 @@ class AuthServiceApplicationTests {
         HttpResponse<String> me = client.get("/api/auth/me");
         assertThat(me.statusCode()).isEqualTo(200);
         assertThat(me.body()).contains("PLATFORM_ADMIN", "bootstrap.admin@test.local", "Platform Administrator");
+    }
+
+    @Test
+    void jwtClaimsContainOnlyTheRequiredRoleAndActiveStoreAccess() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        JWTClaimsSet adminClaims = accessClaims(actor);
+        assertThat(adminClaims.getBooleanClaim("all_stores")).isTrue();
+        assertThat(adminClaims.getAudience()).isEmpty();
+        assertThat(adminClaims.getClaims()).doesNotContainKeys("email", "phoneNumber");
+        HttpResponse<String> jwks = actor.get("/api/auth/.well-known/jwks.json");
+        assertThat(jwks.statusCode()).isEqualTo(200);
+        assertThat(jwks.body()).contains("\"kid\"", "\"use\":\"sig\"", "\"alg\":\"RS256\"");
+        assertThat(jwks.headers().firstValue("Cache-Control").orElse("")).contains("public", "max-age=3600");
+
+        String code = "CL_" + UUID.randomUUID();
+        createStore(actor, code, "Claim Store", null, null, "US", "IN", "47872");
+        long storeId = storeId(code);
+        String email = "claims.user@test.local";
+        String password = UUID.randomUUID().toString() + "-test";
+        createUser(actor, "CLIENT", email, "Claims User", password, null, null);
+        long userId = storeUserId(email);
+        actor.send("PUT", "/api/auth/admin/stores/" + storeId + "/members/" + userId,
+                "{\"storeRole\":\"PARTNER\"}", true, null);
+        AuthHttpClient user = new AuthHttpClient(port);
+        assertThat(user.login(email, password).statusCode()).isEqualTo(200);
+        JWTClaimsSet userClaims = accessClaims(user);
+        assertThat(userClaims.getStringClaim("role")).isEqualTo("CLIENT_USER");
+        assertThat(userClaims.getListClaim("stores")).containsExactly(storeId);
+        assertThat(userClaims.getClaims()).doesNotContainKeys("email", "all_stores");
+
+        assertThat(actor.send("PATCH", "/api/auth/admin/stores/" + storeId,
+                "{\"status\":\"INACTIVE\"}", true, null).statusCode()).isEqualTo(200);
+        assertThat(user.post("/api/auth/refresh").statusCode()).isEqualTo(204);
+        assertThat(accessClaims(user).getListClaim("stores")).isEmpty();
     }
 
     @Test
@@ -728,6 +764,10 @@ class AuthServiceApplicationTests {
         }
         assertThat(jdbcClient.sql("SELECT count(*) FROM core.admin_refresh_tokens WHERE revoked_at IS NULL")
                 .query(Long.class).single()).isEqualTo(1L);
+    }
+
+    private JWTClaimsSet accessClaims(AuthHttpClient client) throws java.text.ParseException {
+        return SignedJWT.parse(client.cookieValue("hor_access")).getJWTClaimsSet();
     }
 
     private AuthHttpClient signedInBootstrapAdmin() throws Exception {
