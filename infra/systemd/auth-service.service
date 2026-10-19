@@ -1,0 +1,23 @@
+[Unit]
+Description=HOR Auth Service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hor
+Group=hor
+WorkingDirectory=/opt/hor-auth
+Environment=HOME=/home/hor
+ExecStart=/usr/bin/java -Xmx384m -jar /opt/hor-auth/auth-service.jar
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/hor/.hor-stores
+
+[Install]
+WantedBy=multi-user.target
