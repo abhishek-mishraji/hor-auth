@@ -1,0 +1,139 @@
+%%{init: {"theme": "forest", "themeVariables": {"primaryColor": "#f8fafc", "primaryBorderColor": "#0f172a", "primaryTextColor": "#0f172a", "lineColor": "#2563eb", "secondaryColor": "#dbeafe", "tertiaryColor": "#eff6ff", "fontFamily": "Arial", "fontSize": "14px"}}}%%
+erDiagram
+%% auth_db, schema core - owned by auth-service (hor-auth). PostgreSQL 16.
+%% Two user tables: platform_admins (one session) and store_users (HOR staff + client users).
+%% No companies: a store has at most one OWNER client (or none yet); other clients of the store are PARTNERs.
+
+%% Owner decisions:
+%% - a store may exist with no owner (created before its client)
+%% - a PARTNER may be assigned to a store that has no OWNER yet
+%% - an email is an admin OR a store user, never both (account_emails)
+%% - staff and clients change their own password; same 10 fails / 15 min lockout as admins
+%% - owners, partners and HOR staff see the same reports for their assigned stores
+%% - disabling a user blocks login only; assignments stay, re-enabling restores access
+
+%% Rules enforced in the database:
+%% - account_emails: UNIQUE (email, account_kind); platform_admins CHECK account_kind = 'ADMIN',
+%%   store_users CHECK account_kind = 'STORE_USER', both FK (email, account_kind) -> account_emails
+%% - store_user_stores: CHECK (user_type = 'CLIENT' AND store_role IN ('OWNER','PARTNER'))
+%%                         OR (user_type = 'STAFF' AND store_role = 'STAFF')
+%% - one owner per store: UNIQUE (store_id) WHERE store_role = 'OWNER'
+%% - store_users: UNIQUE (user_id, user_type) so the mapping can reference both
+%% - every FK indexed; emails citext UNIQUE; moments timestamptz
+
+%% one email = one account, across both user tables
+    ACCOUNT_EMAILS ||--o| PLATFORM_ADMINS : "email of"
+    ACCOUNT_EMAILS ||--o| STORE_USERS : "email of"
+
+%% sessions
+    PLATFORM_ADMINS ||--o{ ADMIN_REFRESH_TOKENS : "one active session"
+    STORE_USERS ||--o{ USER_REFRESH_TOKENS : "many sessions"
+
+%% store membership
+    STORE_USERS ||--o{ STORE_USER_STORES : "assigned to"
+    STORES ||--o{ STORE_USER_STORES : "has owner / partners / staff"
+
+%% who changed what
+    PLATFORM_ADMINS ||--o{ STORE_USERS : "creates"
+    PLATFORM_ADMINS ||--o{ STORE_USER_STORES : "assigns"
+    PLATFORM_ADMINS ||--o{ AUDIT_LOG : "acts"
+
+    ACCOUNT_EMAILS {
+        citext email PK "an email is either an admin or a store user, never both"
+        text account_kind "ADMIN or STORE_USER"
+        timestamptz created_at
+    }
+
+    PLATFORM_ADMINS {
+        bigint admin_id PK
+        text full_name
+        citext email UK, FK "with account_kind -> account_emails"
+        text account_kind FK "always ADMIN (CHECK)"
+        text phone_number "optional"
+        text password_hash "BCrypt"
+        text status "ACTIVE or DISABLED"
+        int failed_login_count
+        timestamptz locked_until "10 fails = 15 min"
+        timestamptz password_changed_at
+        timestamptz last_login_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    STORE_USERS {
+        bigint user_id PK
+        text user_type "CLIENT or STAFF (CLIENT_USER / HOR_STAFF)"
+        text full_name
+        citext email UK, FK "with account_kind -> account_emails"
+        text account_kind FK "always STORE_USER (CHECK)"
+        text phone_number "optional"
+        text address "optional, clients"
+        text password_hash "BCrypt"
+        text status "ACTIVE or DISABLED; disabled keeps store assignments"
+        int failed_login_count
+        timestamptz locked_until "10 fails = 15 min, same as admins"
+        timestamptz password_changed_at "user can change own password"
+        timestamptz last_login_at
+        bigint created_by FK "platform_admins"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    STORES {
+        bigint store_id PK
+        text store_code UK "e.g. 8730_IN-47872"
+        text store_name
+        text pos_vendor "VERIFONE or GILBARCO"
+        text s3_folder UK
+        text address_line1
+        text address_line2 "optional"
+        text city
+        text state_code
+        text postal_code
+        text country_code
+        text contact_number "optional"
+        text timezone "IANA, e.g. America/Indiana/Indianapolis"
+        text status "ACTIVE or INACTIVE"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    STORE_USER_STORES {
+        bigint user_id PK, FK
+        bigint store_id PK, FK
+        text user_type FK "with user_id -> store_users(user_id, user_type)"
+        text store_role "CLIENT: OWNER or PARTNER; STAFF: STAFF"
+        bigint assigned_by FK "platform_admins"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    ADMIN_REFRESH_TOKENS {
+        bigint token_id PK
+        bigint admin_id FK
+        bytea token_hash UK "SHA-256 of the raw token"
+        bigint replaced_by FK "rotation chain"
+        timestamptz expires_at
+        timestamptz revoked_at "new login revokes all"
+        timestamptz created_at
+    }
+
+    USER_REFRESH_TOKENS {
+        bigint token_id PK
+        bigint user_id FK
+        bytea token_hash UK "SHA-256 of the raw token"
+        bigint replaced_by FK "rotation chain"
+        timestamptz expires_at
+        timestamptz revoked_at
+        timestamptz created_at
+    }
+
+    AUDIT_LOG {
+        bigint audit_id PK
+        bigint actor_admin_id FK
+        text action "ADMIN_CREATED, USER_CREATED, STORE_ASSIGNED ..."
+        text target_type "ADMIN, USER, STORE, ASSIGNMENT"
+        bigint target_id
+        jsonb detail "never passwords or tokens"
+        timestamptz created_at "append-only"
+    }

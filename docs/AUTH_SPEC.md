@@ -919,3 +919,6 @@ click-through passes against a running auth-service; the diagram `auth_db.mmd` m
 - **Own admin password reset:** an admin may reset their own password through the admin endpoint; this also ends
   their own sessions.
 - **Unlocking an unlocked account:** return `204` and still write the corresponding `*_UNLOCKED` audit action.
+- **PATCH nulls:** `null` leaves an optional field unchanged; the approved empty string is the only removal value.
+- **PATCH unchanged status:** apply the requested status and write the corresponding status audit action even when it already matches.
+- **Pagination bounds:** cap `limit` at 500 and normalize negative `offset` to 0. `limit=0` returns an empty page; a negative limit returns `400`.
