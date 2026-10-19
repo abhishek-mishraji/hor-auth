@@ -73,7 +73,8 @@ public class HorAuthClientAutoConfiguration {
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated())
                 .oauth2ResourceServer(resourceServer -> resourceServer
-                        .bearerTokenResolver(tokenResolver)
+                                        .authenticationEntryPoint(ProblemResponses.authenticationEntryPoint())
+                                        .bearerTokenResolver(tokenResolver)
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(HorHttpSecurity.jwtAuthenticationConverter())))
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(ProblemResponses.authenticationEntryPoint())

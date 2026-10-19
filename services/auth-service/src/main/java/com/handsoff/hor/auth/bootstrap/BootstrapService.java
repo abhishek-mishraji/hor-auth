@@ -4,6 +4,7 @@ import com.handsoff.hor.auth.audit.AuditAction;
 import com.handsoff.hor.auth.audit.AuditWriter;
 import com.handsoff.hor.auth.config.BootstrapProperties;
 import com.handsoff.hor.auth.password.PasswordHasher;
+import com.handsoff.hor.auth.password.PasswordRules;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Map;
@@ -15,14 +16,16 @@ import org.springframework.util.StringUtils;
 public class BootstrapService {
     private final BootstrapRepository repository;
     private final PasswordHasher passwordHasher;
+    private final PasswordRules passwordRules;
     private final AuditWriter auditWriter;
     private final BootstrapProperties properties;
     private final Clock clock;
 
     public BootstrapService(BootstrapRepository repository, PasswordHasher passwordHasher,
-            AuditWriter auditWriter, BootstrapProperties properties, Clock clock) {
+            PasswordRules passwordRules, AuditWriter auditWriter, BootstrapProperties properties, Clock clock) {
         this.repository = repository;
         this.passwordHasher = passwordHasher;
+        this.passwordRules = passwordRules;
         this.auditWriter = auditWriter;
         this.properties = properties;
         this.clock = clock;
@@ -43,6 +46,7 @@ public class BootstrapService {
             if (!StringUtils.hasText(fullName)) {
                 throw new IllegalStateException("Bootstrap admin full name is required.");
             }
+            passwordRules.requireValid(admin.password());
             firstAdminId = repository.createAdmin(fullName, admin.email(), passwordHasher.hash(admin.password()), now);
             auditWriter.write(firstAdminId, AuditAction.ADMIN_CREATED, "ADMIN", firstAdminId,
                     Map.of("email", admin.email(), "fullName", fullName), now);

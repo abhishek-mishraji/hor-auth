@@ -17,8 +17,9 @@ public class ProblemDetailsAdvice {
     public ResponseEntity<ProblemDetail> handleDomainException(DomainException exception) {
         ErrorCode code = exception.errorCode();
         ProblemDetail body = ProblemDetail.forStatusAndDetail(code.status(), exception.getMessage());
-        body.setTitle(code.status().toString());
+        body.setTitle(org.springframework.http.HttpStatus.valueOf(code.status().value()).getReasonPhrase());
         body.setProperty("code", code.code());
+        exception.properties().forEach(body::setProperty);
         return ResponseEntity.status(code.status()).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
     }
 
@@ -32,6 +33,15 @@ public class ProblemDetailsAdvice {
         body.setProperty("code", CommonErrorCode.VALIDATION_FAILED.code());
         body.setProperty("errors", errors);
         return ResponseEntity.badRequest().contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ProblemDetail> handleUnexpected(Exception exception) {
+        ProblemDetail body = ProblemDetail.forStatusAndDetail(
+                HttpStatus.INTERNAL_SERVER_ERROR, "An internal error occurred.");
+        body.setTitle(HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase());
+        body.setProperty("code", "INTERNAL_ERROR");
+        return ResponseEntity.internalServerError().contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
     }
 
     private Map<String, String> fieldError(FieldError fieldError) {

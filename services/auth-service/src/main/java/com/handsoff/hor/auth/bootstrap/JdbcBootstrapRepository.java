@@ -37,8 +37,9 @@ public class JdbcBootstrapRepository implements BootstrapRepository {
 
     @Override
     public long createAdmin(String fullName, String email, String passwordHash, Instant now) {
-        jdbcClient.sql("INSERT INTO core.account_emails (email, account_kind) VALUES (:email, 'ADMIN')")
+        jdbcClient.sql("INSERT INTO core.account_emails (email, account_kind, created_at) VALUES (:email, 'ADMIN', :now)")
                 .param("email", email)
+                        .param("now", now.atOffset(ZoneOffset.UTC))
                 .update();
         return jdbcClient.sql("""
                 INSERT INTO core.platform_admins
