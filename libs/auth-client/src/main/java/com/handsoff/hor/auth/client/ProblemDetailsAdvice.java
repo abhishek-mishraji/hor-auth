@@ -8,6 +8,8 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -32,6 +34,17 @@ public class ProblemDetailsAdvice {
         body.setTitle(HttpStatus.BAD_REQUEST.getReasonPhrase());
         body.setProperty("code", CommonErrorCode.VALIDATION_FAILED.code());
         body.setProperty("errors", errors);
+        return ResponseEntity.badRequest().contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
+    }
+
+    @ExceptionHandler({MethodArgumentTypeMismatchException.class, HttpMessageNotReadableException.class})
+    public ResponseEntity<ProblemDetail> handleRequestParsing(Exception exception) {
+        String field = exception instanceof MethodArgumentTypeMismatchException mismatch
+                ? mismatch.getName() : "request";
+        ProblemDetail body = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Request validation failed.");
+        body.setTitle(HttpStatus.BAD_REQUEST.getReasonPhrase());
+        body.setProperty("code", CommonErrorCode.VALIDATION_FAILED.code());
+        body.setProperty("errors", List.of(Map.of("field", field, "message", "Invalid value.")));
         return ResponseEntity.badRequest().contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
     }
 

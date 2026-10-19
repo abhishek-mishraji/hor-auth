@@ -1,6 +1,8 @@
 package com.handsoff.hor.auth.session;
 
 import com.handsoff.hor.auth.account.AccountType;
+import com.handsoff.hor.auth.client.RequestLoggingFilter;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
@@ -25,8 +27,10 @@ public class SessionController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<Me> login(@Valid @RequestBody LoginRequest request) {
+    public ResponseEntity<Me> login(@Valid @RequestBody LoginRequest request, HttpServletRequest servletRequest) {
         SessionResult result = sessionService.login(request.email(), request.password());
+        servletRequest.setAttribute(RequestLoggingFilter.ACCOUNT_ATTRIBUTE,
+                result.me().accountType() + ":" + result.me().id());
         HttpHeaders headers = new HttpHeaders();
         cookies.write(headers, result.accessToken(), result.refreshToken());
         return ResponseEntity.ok().headers(headers).body(result.me());
@@ -35,9 +39,12 @@ public class SessionController {
     @PostMapping("/refresh")
     public ResponseEntity<Void> refresh(
             @CookieValue(name = "hor_refresh", required = false) String refreshToken,
-            HttpServletResponse response) {
+            HttpServletResponse response,
+            HttpServletRequest servletRequest) {
         try {
             SessionResult result = sessionService.refresh(refreshToken);
+            servletRequest.setAttribute(RequestLoggingFilter.ACCOUNT_ATTRIBUTE,
+                    result.me().accountType() + ":" + result.me().id());
             HttpHeaders headers = new HttpHeaders();
             cookies.write(headers, result.accessToken(), result.refreshToken());
             return ResponseEntity.noContent().headers(headers).build();

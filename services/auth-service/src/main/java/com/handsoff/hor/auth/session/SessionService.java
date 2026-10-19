@@ -200,8 +200,8 @@ public class SessionService {
                 .filter(token -> token.accountId() == id && token.revokedAt() == null && token.expiresAt().isAfter(now))
                 .orElseThrow(SessionEndedException::new);
         RefreshTokenValue replacement = refreshTokens.generate(accountType);
-        long replacementId = repository.insert(id, replacement.hash(), now.plus(properties.refreshTokenTtl()), now);
         repository.revokeAllExcept(id, currentToken.tokenId(), now);
+        long replacementId = repository.insert(id, replacement.hash(), now.plus(properties.refreshTokenTtl()), now);
         accountEmails.updatePassword(accountType, id, passwordHasher.hash(newPassword), now);
         if (!repository.rotate(currentToken.tokenId(), replacementId, now)) {
             repository.deleteById(replacementId);

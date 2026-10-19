@@ -13,6 +13,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
 public final class RequestLoggingFilter extends OncePerRequestFilter {
+    public static final String ACCOUNT_ATTRIBUTE = "hor.auth.account";
     private static final Logger LOGGER = LoggerFactory.getLogger(RequestLoggingFilter.class);
 
     @Override
@@ -25,11 +26,16 @@ public final class RequestLoggingFilter extends OncePerRequestFilter {
         } finally {
             long durationMillis = (System.nanoTime() - startedAt) / 1_000_000;
             LOGGER.info("{} {} {} {}ms {}", request.getMethod(), request.getRequestURI(), response.getStatus(),
-                    durationMillis, accountIdentifier(SecurityContextHolder.getContext().getAuthentication()));
+                    durationMillis, accountIdentifier(request));
         }
     }
 
-    private String accountIdentifier(Authentication authentication) {
+    private String accountIdentifier(HttpServletRequest request) {
+        Object requestAccount = request.getAttribute(ACCOUNT_ATTRIBUTE);
+        if (requestAccount instanceof String accountIdentifier) {
+            return accountIdentifier;
+        }
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         if (authentication == null || !authentication.isAuthenticated()) {
             return "-";
         }
