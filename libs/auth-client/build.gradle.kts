@@ -21,8 +21,8 @@ dependencies {
 	api("org.springframework.boot:spring-boot-autoconfigure:4.1.1")
 	api("org.springframework.boot:spring-boot-starter-oauth2-resource-server:4.1.1")
 	api("org.springframework.boot:spring-boot-starter-webmvc:4.1.1")
-	testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
-	testImplementation("org.assertj:assertj-core:3.27.4")
+	testImplementation("org.springframework.boot:spring-boot-starter-test:4.1.1")
+	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 tasks.withType<JavaCompile>().configureEach {
