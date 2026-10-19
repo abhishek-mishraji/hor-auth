@@ -176,6 +176,96 @@ class AuthServiceApplicationTests {
     }
 
     @Test
+    void assignmentsEnforceRolesOwnerUniquenessAndAuditSemantics() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String code = "AS_" + UUID.randomUUID();
+        assertThat(createStore(actor, code, "Assignment Store", null, null, "US", "IN", "47872").statusCode())
+                .isEqualTo(201);
+        long storeId = storeId(code);
+        String staffEmail = "assign.staff@test.local";
+        String partnerEmail = "assign.partner@test.local";
+        String ownerEmail = "assign.owner@test.local";
+        String secondOwnerEmail = "assign.second@test.local";
+        createUser(actor, "STAFF", staffEmail, "Assign Staff", UUID.randomUUID().toString() + "-test", null, null);
+        createUser(actor, "CLIENT", partnerEmail, "Assign Partner", UUID.randomUUID().toString() + "-test", null, null);
+        createUser(actor, "CLIENT", ownerEmail, "Assign Owner", UUID.randomUUID().toString() + "-test", null, null);
+        createUser(actor, "CLIENT", secondOwnerEmail, "Second Owner", UUID.randomUUID().toString() + "-test", null, null);
+        long staffId = storeUserId(staffEmail);
+        long partnerId = storeUserId(partnerEmail);
+        long ownerId = storeUserId(ownerEmail);
+        long secondOwnerId = storeUserId(secondOwnerEmail);
+        String path = "/api/auth/admin/stores/" + storeId + "/members/";
+
+        assertThat(actor.send("PUT", path + staffId, "{\"storeRole\":\"STAFF\"}", true, null).statusCode()).isEqualTo(201);
+        long assignedRows = jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'STORE_ASSIGNED' AND target_id = :id")
+                .param("id", storeId).query(Long.class).single();
+        assertThat(actor.send("PUT", path + staffId, "{\"storeRole\":\"STAFF\"}", true, null).statusCode()).isEqualTo(200);
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'STORE_ASSIGNED' AND target_id = :id")
+                .param("id", storeId).query(Long.class).single()).isEqualTo(assignedRows);
+        assertThat(actor.send("PUT", path + partnerId, "{\"storeRole\":\"PARTNER\"}", true, null).statusCode()).isEqualTo(201);
+        assertThat(actor.send("PUT", path + ownerId, "{\"storeRole\":\"OWNER\"}", true, null).statusCode()).isEqualTo(201);
+        HttpResponse<String> secondOwner = actor.send("PUT", path + secondOwnerId,
+                "{\"storeRole\":\"OWNER\"}", true, null);
+        assertThat(secondOwner.statusCode()).isEqualTo(409);
+        assertThat(secondOwner.body()).contains("OWNER_EXISTS");
+        assertThat(actor.send("PUT", path + staffId, "{\"storeRole\":\"PARTNER\"}", true, null).statusCode())
+                .isEqualTo(422);
+        assertThat(actor.send("PUT", path + partnerId, "{\"storeRole\":\"STAFF\"}", true, null).statusCode())
+                .isEqualTo(422);
+        assertThat(actor.send("PUT", path + ownerId, "{\"storeRole\":\"PARTNER\"}", true, null).statusCode())
+                .isEqualTo(200);
+        assertThat(actor.send("PUT", path + partnerId, "{\"storeRole\":\"OWNER\"}", true, null).statusCode())
+                .isEqualTo(200);
+
+        HttpResponse<String> members = actor.get("/api/auth/admin/stores/" + storeId + "/members");
+        assertThat(members.statusCode()).isEqualTo(200);
+        assertThat(members.body()).contains("Assign Staff", "Assign Partner", "Platform Administrator", "OWNER", "STAFF");
+        assertThat(jdbcClient.sql("SELECT count(*) FROM core.audit_log WHERE action = 'STORE_ASSIGNMENT_CHANGED' AND target_id = :id")
+                .param("id", storeId).query(Long.class).single()).isEqualTo(2L);
+
+        assertThat(actor.send("DELETE", path + staffId, null, true, null).statusCode()).isEqualTo(204);
+        assertThat(actor.send("DELETE", path + staffId, null, true, null).statusCode()).isEqualTo(404);
+    }
+
+    @Test
+    void inactiveStoresAndDisabledUsersCanBeAssignedAndRefreshRemovesInactiveAccess() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String code = "IN_" + UUID.randomUUID();
+        assertThat(createStore(actor, code, "Inactive Store", null, null, "US", "IN", "47872").statusCode())
+                .isEqualTo(201);
+        long storeId = storeId(code);
+        String email = "inactive.client@test.local";
+        String password = UUID.randomUUID().toString() + "-test";
+        createUser(actor, "CLIENT", email, "Inactive Client", password, null, null);
+        long userId = storeUserId(email);
+        String storePath = "/api/auth/admin/stores/" + storeId;
+        assertThat(actor.send("PUT", storePath + "/members/" + userId,
+                "{\"storeRole\":\"PARTNER\"}", true, null).statusCode()).isEqualTo(201);
+
+        AuthHttpClient user = new AuthHttpClient(port);
+        assertThat(user.login(email, password).statusCode()).isEqualTo(200);
+        assertThat(user.get("/api/auth/me").body()).contains(code);
+        assertThat(actor.send("PATCH", storePath, "{\"status\":\"INACTIVE\"}", true, null).statusCode())
+                .isEqualTo(200);
+        assertThat(user.post("/api/auth/refresh").statusCode()).isEqualTo(204);
+        assertThat(user.get("/api/auth/me").body()).contains("\"stores\":[]");
+
+        jdbcClient.sql("UPDATE core.store_users SET status = 'DISABLED' WHERE user_id = :id")
+                .param("id", userId).update();
+        String otherCode = "OFF_" + UUID.randomUUID();
+        assertThat(createStore(actor, otherCode, "Another Store", null, null, "US", "IN", "47872").statusCode())
+                .isEqualTo(201);
+        long otherStoreId = storeId(otherCode);
+        assertThat(actor.send("PATCH", "/api/auth/admin/stores/" + otherStoreId,
+                "{\"status\":\"INACTIVE\"}", true, null).statusCode()).isEqualTo(200);
+        HttpResponse<String> assignedDisabled = actor.send("PUT",
+                "/api/auth/admin/stores/" + otherStoreId + "/members/" + userId,
+                "{\"storeRole\":\"PARTNER\"}", true, null);
+        assertThat(assignedDisabled.statusCode()).isEqualTo(201);
+        assertThat(assignedDisabled.body()).contains("DISABLED", "Platform Administrator");
+    }
+
+    @Test
     void storeCreateSearchPatchAndStatusRules() throws Exception {
         AuthHttpClient actor = signedInBootstrapAdmin();
         String code = "ST_" + UUID.randomUUID();
