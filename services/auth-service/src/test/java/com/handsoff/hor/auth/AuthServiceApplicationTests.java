@@ -176,6 +176,68 @@ class AuthServiceApplicationTests {
     }
 
     @Test
+    void storeCreateSearchPatchAndStatusRules() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String code = "ST_" + UUID.randomUUID();
+        HttpResponse<String> created = createStore(actor, code, "Example Store", "Suite 1", "555 555 0100",
+                "us", "in", "90210");
+        assertThat(created.statusCode()).isEqualTo(201);
+        assertThat(created.body()).contains("Example Store", "\"stateCode\":\"IN\"", "\"countryCode\":\"US\"");
+        long id = storeId(code);
+
+        HttpResponse<String> searched = actor.get("/api/auth/admin/stores?q=" + code.toLowerCase(java.util.Locale.ROOT));
+        assertThat(searched.statusCode()).isEqualTo(200);
+        assertThat(searched.body()).contains(code, "Example Store", "\"memberCount\":0");
+
+        HttpResponse<String> removedOptional = actor.send("PATCH", "/api/auth/admin/stores/" + id,
+                "{\"addressLine2\":\"\",\"contactNumber\":\"\"}", true, null);
+        assertThat(removedOptional.statusCode()).isEqualTo(200);
+        assertThat(removedOptional.body()).doesNotContain("addressLine2", "contactNumber");
+        assertThat(jdbcClient.sql("SELECT address_line2 IS NULL AND contact_number IS NULL FROM core.stores WHERE store_id = :id")
+                .param("id", id).query(Boolean.class).single()).isTrue();
+
+        HttpResponse<String> mixedStatus = actor.send("PATCH", "/api/auth/admin/stores/" + id,
+                "{\"status\":\"INACTIVE\",\"city\":\"New City\"}", true, null);
+        assertThat(mixedStatus.statusCode()).isEqualTo(422);
+        assertThat(mixedStatus.body()).contains("STATUS_CHANGE_ALONE");
+        assertThat(actor.send("PATCH", "/api/auth/admin/stores/" + id, "{\"storeCode\":\"OTHER\"}", true, null)
+                .statusCode()).isEqualTo(422);
+        assertThat(actor.send("PATCH", "/api/auth/admin/stores/" + id, "{\"posVendor\":\"GILBARCO\"}", true, null)
+                .statusCode()).isEqualTo(422);
+        HttpResponse<String> badTimezone = actor.send("PATCH", "/api/auth/admin/stores/" + id,
+                "{\"timezone\":\"not/a-zone\"}", true, null);
+        assertThat(badTimezone.statusCode()).isEqualTo(422);
+        assertThat(badTimezone.body()).contains("INVALID_TIMEZONE");
+
+        assertThat(actor.send("PATCH", "/api/auth/admin/stores/" + id, "{\"status\":\"INACTIVE\"}", true, null)
+                .statusCode()).isEqualTo(200);
+        assertThat(actor.send("PATCH", "/api/auth/admin/stores/" + id, "{\"status\":\"ACTIVE\"}", true, null)
+                .statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void storeValidationAndDuplicateCodeUseSpecifiedErrors() throws Exception {
+        AuthHttpClient actor = signedInBootstrapAdmin();
+        String code = "DUP_" + UUID.randomUUID();
+        assertThat(createStore(actor, code, "Duplicate Store", null, null, "US", "IN", "47872").statusCode())
+                .isEqualTo(201);
+        HttpResponse<String> duplicate = createStore(actor, code, "Duplicate Store Again", null, null,
+                "US", "IN", "47872", "different/" + code + "/");
+        assertThat(duplicate.statusCode()).isEqualTo(409);
+        assertThat(duplicate.body()).contains("STORE_CODE_TAKEN");
+
+        String invalidCode = "ZIP_" + UUID.randomUUID();
+        HttpResponse<String> invalidPostal = createStore(actor, invalidCode, "Bad Postal", null, null,
+                "US", "IN", "bad-zip");
+        assertThat(invalidPostal.statusCode()).isEqualTo(422);
+        assertThat(invalidPostal.body()).contains("INVALID_POSTAL_CODE");
+        HttpResponse<String> invalidFolder = createStore(actor, "FD_" + UUID.randomUUID(), "Bad Folder",
+                null, null, "US", "IN", "47872", "/starts/with/slash/");
+        assertThat(invalidFolder.statusCode()).as("problem response: " + invalidFolder.body()).isEqualTo(422);
+        assertThat(invalidFolder.body()).contains("INVALID_S3_FOLDER");
+    }
+
+    @Test
     void adminCreatesStaffAndClientWithFixedTypeAndOptionalPatchRemoval() throws Exception {
         AuthHttpClient actor = signedInBootstrapAdmin();
         String staffPassword = UUID.randomUUID().toString() + "-test";
@@ -455,6 +517,32 @@ class AuthServiceApplicationTests {
     private long storeUserId(String email) {
         return jdbcClient.sql("SELECT user_id FROM core.store_users WHERE email = :email")
                 .param("email", email).query(Long.class).single();
+    }
+
+    private HttpResponse<String> createStore(AuthHttpClient actor, String code, String name,
+            String addressLine2, String contactNumber, String countryCode, String stateCode, String postalCode)
+            throws Exception {
+        return createStore(actor, code, name, addressLine2, contactNumber, countryCode, stateCode, postalCode,
+                "Stores/" + code + "/");
+    }
+
+    private HttpResponse<String> createStore(AuthHttpClient actor, String code, String name,
+            String addressLine2, String contactNumber, String countryCode, String stateCode, String postalCode,
+            String s3Folder) throws Exception {
+        String address2 = addressLine2 == null ? "" : ",\"addressLine2\":\"" + addressLine2 + "\"";
+        String phone = contactNumber == null ? "" : ",\"contactNumber\":\"" + contactNumber + "\"";
+        String body = "{\"storeCode\":\"" + code + "\",\"storeName\":\"" + name
+                + "\",\"posVendor\":\"VERIFONE\",\"s3Folder\":\"" + s3Folder
+                + "\",\"addressLine1\":\"100 Main Street\"" + address2
+                + ",\"city\":\"Rockville\",\"stateCode\":\"" + stateCode
+                + "\",\"postalCode\":\"" + postalCode + "\",\"countryCode\":\"" + countryCode
+                + "\",\"timezone\":\"America/Indiana/Indianapolis\"" + phone + "}";
+        return actor.send("POST", "/api/auth/admin/stores", body, true, null);
+    }
+
+    private long storeId(String code) {
+        return jdbcClient.sql("SELECT store_id FROM core.stores WHERE store_code = :code")
+                .param("code", code).query(Long.class).single();
     }
 
     private void createTestStoreUser() {
