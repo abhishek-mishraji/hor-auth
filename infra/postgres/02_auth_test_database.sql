@@ -1,0 +1,4 @@
+CREATE ROLE auth_svc LOGIN PASSWORD :'auth_pw';
+CREATE DATABASE auth_db_test OWNER auth_svc ENCODING 'UTF8' TEMPLATE template0;
+REVOKE ALL ON DATABASE auth_db_test FROM PUBLIC;
+GRANT CONNECT, TEMPORARY ON DATABASE auth_db_test TO auth_svc;

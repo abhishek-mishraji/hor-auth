@@ -1,0 +1,8 @@
+**/build/
+**/.gradle/
+**/node_modules/
+**/dist/
+*.pem
+secrets*
+*.log
+local.properties
