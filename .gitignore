@@ -6,3 +6,24 @@
 secrets*
 *.log
 local.properties
+
+# --- added before first push ---
+.env
+.env.local
+.env.*.local
+!.env.example
+*.key
+**/bin/
+**/out/
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+*.class
+hs_err_pid*
+replay_pid*
+**/graphify-out/
+coverage/
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.vscode/

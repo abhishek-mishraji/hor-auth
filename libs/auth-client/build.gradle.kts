@@ -3,7 +3,7 @@ plugins {
 	`maven-publish`
 }
 
-group = "com.handsoff.hor"
+group = "com.handsoffretail"
 version = "0.1.0"
 
 java {

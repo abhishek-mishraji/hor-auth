@@ -4,7 +4,7 @@ plugins {
 	id("io.spring.dependency-management")
 }
 
-group = "com.handsoff.hor"
+group = "com.handsoffretail"
 version = "0.1.0"
 
 java {
@@ -18,7 +18,7 @@ repositories {
 }
 
 dependencies {
-	implementation("com.handsoff.hor:auth-client:0.1.0")
+	implementation("com.handsoffretail:auth-client:0.1.0")
 	implementation("org.springframework.boot:spring-boot-starter-flyway")
 	implementation("org.springframework.boot:spring-boot-starter-jdbc")
 	implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
