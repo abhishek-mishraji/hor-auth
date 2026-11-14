@@ -10,10 +10,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=hor
-Group=hor
+User=ubuntu
+Group=ubuntu
 WorkingDirectory=/opt/hor/centralized-auth/hor-auth/services/auth-service
-Environment=HOME=/home/hor
 ExecStart=/usr/bin/java -Xmx384m -jar /opt/hor/centralized-auth/hor-auth/services/auth-service/build/libs/auth-service.jar
 SuccessExitStatus=143
 Restart=on-failure
