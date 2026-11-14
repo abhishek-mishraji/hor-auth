@@ -1,3 +1,8 @@
+# Install: sudo cp infra/systemd/auth-service.service /etc/systemd/system/auth-service.service
+#          sudo systemctl daemon-reload && sudo systemctl enable --now auth-service
+# Runs the jar straight from the clone. WorkingDirectory holds .env and auth-signing-key.pem
+# (set hor.auth.signing-key-path=auth-signing-key.pem in .env). The service has read-only access
+# to the disk, so a missing key makes it fail to start instead of silently generating a new one.
 [Unit]
 Description=HOR Auth Service
 After=network-online.target postgresql.service
@@ -7,9 +12,10 @@ Wants=network-online.target
 Type=simple
 User=hor
 Group=hor
-WorkingDirectory=/opt/hor-auth
+WorkingDirectory=/opt/hor/centralized-auth/hor-auth/services/auth-service
 Environment=HOME=/home/hor
-ExecStart=/usr/bin/java -Xmx384m -jar /opt/hor-auth/auth-service.jar
+ExecStart=/usr/bin/java -Xmx384m -jar /opt/hor/centralized-auth/hor-auth/services/auth-service/build/libs/auth-service.jar
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -17,7 +23,7 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/hor/.hor-stores
+ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target

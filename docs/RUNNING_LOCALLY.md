@@ -51,7 +51,7 @@ The auth-console is not included in this backend build. Cookies are always `Secu
 
 The service systemd unit is in `infra/systemd/auth-service.service`. Install it as `/etc/systemd/system/auth-service.service`, ensure `/home/hor/.hor-stores/secrets.properties` is owned by `hor` and mode `600`, and place the executable jar at `/opt/hor-auth/auth-service.jar`.
 
-`infra/nginx/auth.conf` is included from nginx's `http {}` context. Install `infra/nginx/auth-api-locations.conf` as `/etc/nginx/snippets/hor-auth-api-locations.conf`; the same snippet is included in the `apps.handsoffretail.com` server block so refresh/logout stay same-origin there. The login location applies the 10-requests-per-minute-per-IP nginx rate limit with a burst of five. The auth virtual host serves `/opt/hor-auth/auth-console/dist` when that UI is deployed.
+`infra/nginx/auth.conf` is a single site file (no snippet): copy it to `/etc/nginx/sites-available/auth.handsoffretail.com`, symlink it into `/etc/nginx/sites-enabled/`, reload nginx, then run `certbot --nginx -d auth.handsoffretail.com` to add HTTPS and the http-to-https redirect. It proxies `/api/auth/` to `127.0.0.1:8091` (login rate limited to 10 requests per minute per IP, burst 5) and serves the console build straight from the clone, `/opt/hor/centralized-auth/hor-auth/web/auth-console/dist` (www-data needs o+x on each parent folder). Another host that needs same-origin `/api/auth/` (e.g. `apps.handsoffretail.com`) copies the two `/api/auth` location blocks, but not the `limit_req_zone` line.
 
 On the VM, set `hor.auth.allowed-origins=https://auth.handsoffretail.com,https://apps.handsoffretail.com` and `hor.auth.cookie-domain=handsoffretail.com`. Keep the service bound to loopback; nginx is the public entry point.
 
