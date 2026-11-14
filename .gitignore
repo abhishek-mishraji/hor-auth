@@ -27,3 +27,6 @@ Thumbs.db
 .idea/
 *.iml
 .vscode/
+
+# Any env file with real values (e.g. prod.env)
+*.env
